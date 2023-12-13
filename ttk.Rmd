@@ -1,0 +1,394 @@
+---
+title: "MA678 Final Project"
+author: "Ruicheng Zhang"
+date: "2023-12-10"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+library(rstanarm)
+library(knitr)
+library(stringr)
+library(rstan)
+library(ggplot2)
+library(dplyr)
+library(data.table)
+library(tidyr)
+library(corrplot)
+library(lme4)
+knitr::opts_chunk$set(echo = TRUE,warning=FALSE,message=FALSE)
+
+options(mc.cores = parallel::detectCores())
+rstan::rstan_options(auto_write = TRUE)
+options(rstan.verbose = FALSE)
+```
+
+
+## Data Import
+
+```{r}
+data <-read.csv("~/Downloads/678project/data/train.csv", header=T)
+
+
+```
+
+## Data description
+
+
+## Data Explore
+```{r}
+data$Product_ID <- as.numeric(sub("P", "", data$Product_ID))
+
+data$Gender <- as.numeric(factor(data$Gender))
+data$Gender <- ifelse(data$Gender == "2", 1, 0)
+data$City_Category <- as.numeric(factor(data$City_Category))
+
+
+data$Stay_In_Current_City_Years <- as.numeric(sub("\\+", "", data$Stay_In_Current_City_Years))
+
+data$Log_Purchase <- log(data$Purchase + 1)
+```
+
+
+```{r}
+unique(data$Age)
+age_levels <- c("0-17", "18-25", "26-35", "36-45", "46-50", "51-55", "55+")
+data$Age <- factor(data$Age, levels = age_levels, labels = 0:6)
+data$Age <- as.numeric(data$Age)
+```
+
+into 0,1,2,3,4,5,6
+
+```{r}
+data$User_ID <- data$User_ID - 1000000
+hist(data$Log_Purchase, main="Histogram of Log-transformed Purchase", xlab="Log(Purchase)", ylab="Frequency")
+```
+
+
+```{r}
+variable_details <- data.frame(
+  Variable = c("User_ID", "Product_ID", "Gender", "Age", "Occupation", "City_Category", 
+               "Stay_In_Current_City_Years", "Marital_Status", "Product_Category_1", 
+               "Product_Category_2", "Product_Category_3", "Purchase"),
+  Type = c("Integer", "Integer", "Integer (Categorical)", "Integer (Categorical)", 
+           "Integer (Categorical)", "Integer (Categorical)", "Integer (Categorical)", 
+           "Integer (Categorical)", "Integer", "Integer", "Integer", "Integer"),
+  Description = c("Unique identifier of the user", 
+                  "Unique identifier of the product", 
+                  "Gender of the user (0 for female, 1 for male)", 
+                  "Age group of the user (coded as integers)", 
+                  "Occupation code of the user", 
+                  "Category of the city (1 for A, 2 for B, 3 for C )", 
+                  "Number of years the user has lived in the current city", 
+                  "Marital status of the user (0 for single, 1 for married)", 
+                  "Product category code 1", 
+                  "Product category code 2 (may contain NA for missing values)", 
+                  "Product category code 3 (may contain NA for missing values)", 
+                  "Purchase amount in dollars")
+)
+
+knitr::kable(variable_details, format = "markdown", caption = "Overview of Variables in Dataset")
+```
+
+## Data analysis
+
+```{r}
+ggplot(data, aes(x = Log_Purchase)) + 
+  geom_histogram(aes(y = ..density..), bins = 30, fill = "blue", alpha = 0.7) +
+  geom_density(colour = "red", size = 1) +
+  labs(title = "Histogram of Purchase")
+
+qqnorm(data$Log_Purchase)
+qqline(data$Log_Purchase, col = "red")
+
+```
+
+```{r}
+cor_matrix <- cor(select_if(data, is.numeric), use = "complete.obs")
+
+corrplot(cor_matrix, method = "color",
+         type = "upper", # Display only upper half of the matrix
+         order = "hclust", # Order the matrix based on hierarchical clustering
+         tl.col = "black", # Text label color
+         tl.srt = 45, # Text label rotation
+         tl.cex = 0.6, # Text label size
+         diag = FALSE, # Don't display the diagonal
+         addCoef.col = "black", # Add correlation coefficient on the plot
+         number.cex = 0.7, # Size of the correlation coefficient
+         cl.cex = 0.7, # Size of the color legend text
+         cl.ratio = 0.1, # Ratio of the color legend size
+         col = colorRampPalette(c("#7F0000", "white", "#003C30"))(200)) # Custom color palette
+```
+
+
+
+```{r}
+ggplot(data, aes(x = as.factor(City_Category), y = Log_Purchase)) + 
+  geom_boxplot() + 
+  labs(title = "Boxplot of Purchase by City Category", x = "City Category", y = "Purchase Amount")
+
+ggplot(data, aes(x = Log_Purchase)) + 
+  geom_density(fill = "blue", alpha = 0.5) +
+  labs(title = "Density Plot of Purchase Amount", x = "Purchase Amount", y = "Density")
+
+ggplot(data, aes(x = as.factor(Gender), y = Log_Purchase)) + 
+  geom_violin(trim = FALSE) + 
+  labs(title = "Violin Plot of Purchase by Gender", x = "Gender", y = "Purchase Amount")
+
+```
+
+
+```{r}
+ggplot(data, aes(x = as.factor(Age), y = Log_Purchase, fill = as.factor(Gender))) +
+  geom_bar(stat = "summary", fun = "sum", position = "stack") +
+  labs(title = "Stacked Bar Chart of Purchase by Age and Gender",
+       x = "Age",
+       y = "Total Purchase Amount",
+       fill = "Gender") +
+  theme_minimal()
+
+```
+
+```{r}
+data <- subset(data, select = -c(Occupation,Marital_Status,Product_Category_3,Stay_In_Current_City_Years,Age,Purchase))
+```
+
+```{r}
+set.seed(123)
+
+train_ratio <- 0.7
+
+
+train_n <- floor(train_ratio * nrow(data))
+
+train_indices <- sample(seq_len(nrow(data)), size = train_n)
+
+train_set <- data[train_indices, ]
+test_set <- data[-train_indices, ]
+train_set <- na.omit(train_set)
+test_set <- na.omit(test_set)
+```
+
+
+
+
+## Build Model
+
+# Null Model
+```{r}
+null_model <- lm(Log_Purchase ~ 1, data = data)
+summary(null_model)
+```
+
+```{r}
+plot(data$Log_Purchase, null_model$residuals, 
+     main = "Residuals vs. Observed Values", 
+     xlab = "Observed Values", 
+     ylab = "Residuals") 
+
+qqnorm(null_model$residuals)
+qqline(null_model$residuals)
+```
+# No pooling Model
+```{r, echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+npm <- lm(formula = Log_Purchase ~ Gender + Product_Category_1 + Product_Category_2 + factor(City_Category) - 1, data = data)
+
+```
+
+```{r}
+plot(npm, which = 2)
+```
+
+```{r}
+summary(npm)
+
+predictions <- predict(npm, newdata = test_set)
+
+
+mse <- mean((test_set$Log_Purchase - predictions)^2)
+mae <- mean(abs(test_set$Log_Purchase - predictions))
+print(mse)
+print(mae)
+```
+
+```{r}
+plot(npm, which = 1) 
+ggplot(test_set, aes(x = predictions, y = Log_Purchase)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, col = "red")
+```
+
+# Complete pooling Model
+```{r,echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+cpm <- lm(formula =  Log_Purchase ~ ., data = data)
+
+```
+
+```{r}
+summary(cpm)
+predictions <- predict(cpm, newdata = test_set)
+
+
+mse <- mean((test_set$Log_Purchase - predictions)^2)
+mae <- mean(abs(test_set$Log_Purchase - predictions))
+print(mse)
+print(mae)
+ggplot(test_set, aes(x = predictions, y = Log_Purchase)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, col = "red")
+```
+
+```{r}
+plot(cpm, which = 1) 
+plot(cpm, which = 2)
+```
+
+# Partial pooling Model
+```{r,echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+partial_pooling_model <- lmer(Log_Purchase ~ Gender + Product_Category_1 + Product_Category_2 + (1 | City_Category), data = data)
+
+```
+
+```{r}
+summary(partial_pooling_model)
+
+predictions <- predict(partial_pooling_model, newdata = test_set)
+
+
+mse <- mean((test_set$Log_Purchase - predictions)^2)
+mae <- mean(abs(test_set$Log_Purchase - predictions))
+print(mse)
+print(mae)
+library(lme4)
+library(performance)
+r2(partial_pooling_model)
+ggplot(test_set, aes(x = predictions, y = Log_Purchase)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, col = "red")
+```
+
+```{r}
+residuals <- resid(partial_pooling_model)
+fitted_values <- fitted(partial_pooling_model)
+
+ggplot() +
+  geom_point(aes(x = fitted_values, y = residuals)) +
+  geom_smooth(aes(x = fitted_values, y = residuals), color = "red") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(x = "Fitted Values", y = "Residuals", title = "Residual Plot for Partial Pooling Model")
+```
+
+# Normal Linear Regression Model(Robust Model)
+```{r}
+library(MASS)
+robust_model <- rlm(Log_Purchase ~ Gender + Product_Category_1 + Product_Category_2, data = data)
+
+
+```
+
+```{r}
+summary(robust_model)
+
+predictions <- predict(partial_pooling_model, newdata = test_set)
+
+
+mse <- mean((test_set$Log_Purchase - predictions)^2)
+mae <- mean(abs(test_set$Log_Purchase - predictions))
+print(mse)
+print(mae)
+ggplot(test_set, aes(x = predictions, y = Log_Purchase)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, col = "red")
+```
+```{r}
+
+
+
+```
+
+
+```{r}
+
+plot(robust_model, which = 1) 
+plot(robust_model, which = 2)
+```
+
+# Bayesian Regression Model
+```{r}
+hcode<- "data {
+  int<lower=0> N;
+  int<lower=0> K;
+  matrix[N, K] X;
+  vector[N] y;     
+}
+parameters {
+  vector[K] beta;
+  real alpha;
+  real<lower=0> sigma;
+}
+model {
+  y ~ normal(X * beta + alpha, sigma);
+}
+"
+df<- na.omit(data)
+stan_data <- list(
+  N = nrow(df),
+  K = ncol(df[, -which(names(df) == "Purchase")]), 
+  X = as.matrix(df[, -which(names(df) == "Purchase")]),
+  y = df$Purchase
+)
+
+fit <- stan(model_code =hcode, data = stan_data, iter = 1000, chains = 2)
+```
+
+
+```{r}
+summary(fit)
+
+
+```
+
+
+```{r}
+library(rstan)
+library(bayesplot)
+traceplot(fit)
+```
+
+
+```{r}
+dall <- data.frame(
+  Actual = test_set$Log_Purchase, 
+  Model1 = predict(npm, newdata = test_set),
+  Model2 = predict(cpm, newdata = test_set), 
+  Model3 = predict(partial_pooling_model, newdata = test_set),
+  Model4 = predict(partial_pooling_model, newdata = test_set)
+  )
+data_long <- pivot_longer(
+  dall,
+  cols = starts_with("Model"),
+  names_to = "Model",
+  values_to = "Prediction"
+)
+
+ggplot(data_long, aes(x = Actual, y = Prediction, color = Model)) + 
+  geom_point(position = position_jitter(width = 0.1, height = 0), alpha = 0.4, size = 1.5) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "grey40", size = 0.5) +
+  scale_color_brewer(palette = "Set1") +
+  theme_minimal(base_size = 12) +
+  labs(
+    title = "Actual vs. Predicted Values Across Models",
+    x = "Actual Values",
+    y = "Predicted Values"
+  ) +
+  theme(
+    legend.position = "right",
+    legend.title = element_blank(),
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    axis.title = element_text(face = "bold")
+  )
+
+
+```
+
+
